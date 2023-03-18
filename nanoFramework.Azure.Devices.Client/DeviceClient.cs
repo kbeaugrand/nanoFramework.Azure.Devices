@@ -15,13 +15,14 @@ using System.Web;
 namespace nanoFramework.Azure.Devices.Client
 {
     /// <summary>
-    /// Azure IoT Client SDK for .NET nanoFramework using MQTT
+    /// Azure IoT Client SDK for .NET nanoFramework using MQTT.
     /// </summary>
     public class DeviceClient : IDisposable
     {
-        const string TwinReportedPropertiesTopic = "$iothub/twin/PATCH/properties/reported/";
-        const string TwinDesiredPropertiesTopic = "$iothub/twin/GET/";
-        const string DirectMethodTopic = "$iothub/methods/POST/";
+        private const string TwinReportedPropertiesTopic = "$iothub/twin/PATCH/properties/reported/";
+        private const string TwinDesiredPropertiesTopic = "$iothub/twin/GET/";
+        private const string DirectMethodTopic = "$iothub/methods/POST/";
+        private const string ApiVersion = "2021-04-12";
 
         private readonly string _iotHubName;
         private readonly string _deviceId;
@@ -29,22 +30,21 @@ namespace nanoFramework.Azure.Devices.Client
         private readonly string _telemetryTopic;
         private readonly X509Certificate2 _clientCert;
         private readonly string _deviceMessageTopic;
-        private readonly string _privateKey;
         private Twin _twin;
         private bool _twinReceived;
-        private MqttClient _mqttc;
+        private MqttClient _mqttc = null;
         private readonly IoTHubStatus _ioTHubStatus = new IoTHubStatus();
         private readonly ArrayList _methodCallback = new ArrayList();
         private readonly ArrayList _waitForConfirmation = new ArrayList();
         private readonly object _lock = new object();
         private Timer _timerTokenRenew;
         private readonly X509Certificate _azureRootCACert;
-        private bool _isCertificate;
+        private bool _hasClientCertificate;
 
         /// <summary>
         /// Device twin updated event.
         /// </summary>
-        public event TwinUpdated TwinUpated;
+        public event TwinUpdated TwinUpdated;
 
         /// <summary>
         /// Status change event.
@@ -56,30 +56,46 @@ namespace nanoFramework.Azure.Devices.Client
         /// </summary>
         public event CloudToDeviceMessage CloudToDeviceMessage;
 
+        internal DeviceClient()
+        {
+            // required for Unit Tests
+        }
+
         /// <summary>
         /// Creates an <see cref="DeviceClient"/> class.
         /// </summary>
-        /// <param name="iotHubName">The Azure IoT name fully qualified (ex: youriothub.azure-devices.net)</param>
+        /// <param name="iotHubName">The Azure IoT name fully qualified (ex: youriothub.azure-devices.net).</param>
         /// <param name="deviceId">The device ID which is the name of your device.</param>
+        /// <param name="moduleId">The module ID which is attached to the device ID.</param>
         /// <param name="sasKey">One of the SAS Key either primary, either secondary.</param>
-        /// <param name="qosLevel">The default quality level delivery for the MQTT messages, default to the lower quality</param>
-        /// <param name="azureCert">Azure certificate for the connection to Azure IoT Hub</param>
-        /// <param name="modelId">Azure Plug and Play model ID</param>
-        public DeviceClient(string iotHubName, string deviceId, string sasKey, MqttQoSLevel qosLevel = MqttQoSLevel.AtLeastOnce, X509Certificate azureCert = null, string modelId = null)
+        /// <param name="qosLevel">The default quality level delivery for the MQTT messages, default to the lower quality.</param>
+        /// <param name="azureCert">Azure certificate for the connection to Azure IoT Hub.</param>
+        /// <param name="modelId">Azure Plug and Play model ID.</param>
+        public DeviceClient(string iotHubName, string deviceId, string moduleId, string sasKey, MqttQoSLevel qosLevel = MqttQoSLevel.AtLeastOnce, X509Certificate azureCert = null, string modelId = null)
         {
-            _isCertificate = false;
             _clientCert = null;
-            _privateKey = null;
             _iotHubName = iotHubName;
-            _deviceId = deviceId;
+            ModelId = modelId;
+            ModuleId = moduleId;
             _sasKey = sasKey;
-            _telemetryTopic = $"devices/{_deviceId}/messages/events/";
-            _ioTHubStatus.Status = Status.Disconnected;
-            _ioTHubStatus.Message = string.Empty;
-            _deviceMessageTopic = $"devices/{_deviceId}/messages/devicebound/";
             QosLevel = qosLevel;
             _azureRootCACert = azureCert;
-            ModelId = modelId;
+
+            if (string.IsNullOrEmpty(moduleId))
+            {
+                _telemetryTopic = $"devices/{deviceId}/messages/events/";
+                _deviceId = deviceId;
+            }
+            else
+            {
+                _telemetryTopic = $"devices/{deviceId}/modules/{ModuleId}/messages/events/";
+                _deviceId = deviceId + "/" + moduleId;
+            }
+
+            _deviceMessageTopic = $"devices/{_deviceId}/messages/devicebound/";
+
+            _ioTHubStatus.Status = Status.Disconnected;
+            _ioTHubStatus.Message = string.Empty;
         }
 
         /// <summary>
@@ -87,32 +103,75 @@ namespace nanoFramework.Azure.Devices.Client
         /// </summary>
         /// <param name="iotHubName">Your Azure IoT Hub fully qualified domain name (example: youriothub.azure-devices.net).</param>
         /// <param name="deviceId">The device ID (name of your device).</param>
-        /// <param name="clientCert">The certificate to connect the device (containing both public and private keys). Pass null if you are using the certificate store on the device</param>
+        /// /// <param name="moduleId">The module ID which is attached to the device ID.</param>
+        /// <param name="clientCert">The certificate to connect the device (containing both public and private keys). Pass null if you are using the certificate store on the device.</param>
         /// <param name="qosLevel">The default quality of assurance level for delivery for the MQTT messages (defaults to the lowest quality).</param>
-        /// /// <param name="azureCert">Azure certificate for the connection to Azure IoT Hub</param>
-        /// /// <param name="modelId">Azure Plug and Play model ID</param>
-        public DeviceClient(string iotHubName, string deviceId, X509Certificate2 clientCert, MqttQoSLevel qosLevel = MqttQoSLevel.AtMostOnce, X509Certificate azureCert = null, string modelId = null)
+        /// /// <param name="azureCert">Azure certificate for the connection to Azure IoT Hub.</param>
+        /// /// <param name="modelId">Azure Plug and Play model ID.</param>
+        public DeviceClient(string iotHubName, string deviceId, string moduleId, X509Certificate2 clientCert, MqttQoSLevel qosLevel = MqttQoSLevel.AtMostOnce, X509Certificate azureCert = null, string modelId = null)
         {
-            _isCertificate = true;
+            _hasClientCertificate = true;
             _clientCert = clientCert;
-            // In case we are using the store, the magic should happen automaticall
-            _privateKey = _clientCert != null ? Convert.ToBase64String(clientCert.PrivateKey) : null;
             _iotHubName = iotHubName;
-            _deviceId = deviceId;
-            _sasKey = null;
-            _telemetryTopic = $"devices/{_deviceId}/messages/events/";
-            _ioTHubStatus.Status = Status.Disconnected;
-            _ioTHubStatus.Message = string.Empty;
-            _deviceMessageTopic = $"devices/{_deviceId}/messages/devicebound/";
+            ModelId = modelId;
+            ModuleId = moduleId;
             QosLevel = qosLevel;
             _azureRootCACert = azureCert;
-            ModelId = modelId;
+
+            if (string.IsNullOrEmpty(moduleId))
+            {
+                _telemetryTopic = $"devices/{deviceId}/messages/events/";
+                _deviceId = deviceId;
+            }
+            else
+            {
+                _telemetryTopic = $"devices/{deviceId}/modules/{ModuleId}/messages/events/";
+                _deviceId = deviceId + "/" + moduleId;
+            }
+
+            _deviceMessageTopic = $"devices/{_deviceId}/messages/devicebound/";
+
+            _ioTHubStatus.Status = Status.Disconnected;
+            _ioTHubStatus.Message = string.Empty;
         }
 
         /// <summary>
-        /// Azure Plug and Play model ID
+        /// Creates an <see cref="DeviceClient"/> class.
+        /// </summary>
+        /// <param name="iotHubName">The Azure IoT name fully qualified (ex: youriothub.azure-devices.net).</param>
+        /// <param name="deviceId">The device ID which is the name of your device.</param>
+        /// <param name="sasKey">One of the SAS Key either primary, either secondary.</param>
+        /// <param name="qosLevel">The default quality level delivery for the MQTT messages, default to the lower quality.</param>
+        /// <param name="azureCert">Azure certificate for the connection to Azure IoT Hub.</param>
+        /// <param name="modelId">Azure Plug and Play model ID.</param>
+        public DeviceClient(string iotHubName, string deviceId, string sasKey, MqttQoSLevel qosLevel = MqttQoSLevel.AtLeastOnce, X509Certificate azureCert = null, string modelId = null)
+            : this(iotHubName, deviceId, string.Empty, sasKey, qosLevel, azureCert, modelId)
+        {
+        }
+
+        /// <summary>
+        /// Creates an <see cref="DeviceClient"/> class.
+        /// </summary>
+        /// <param name="iotHubName">Your Azure IoT Hub fully qualified domain name (example: youriothub.azure-devices.net).</param>
+        /// <param name="deviceId">The device ID (name of your device).</param>
+        /// <param name="clientCert">The certificate to connect the device (containing both public and private keys). Pass null if you are using the certificate store on the device.</param>
+        /// <param name="qosLevel">The default quality of assurance level for delivery for the MQTT messages (defaults to the lowest quality).</param>
+        /// /// <param name="azureCert">Azure certificate for the connection to Azure IoT Hub.</param>
+        /// /// <param name="modelId">Azure Plug and Play model ID.</param>
+        public DeviceClient(string iotHubName, string deviceId, X509Certificate2 clientCert, MqttQoSLevel qosLevel = MqttQoSLevel.AtMostOnce, X509Certificate azureCert = null, string modelId = null)
+             : this(iotHubName, deviceId, string.Empty, clientCert, qosLevel, azureCert, modelId)
+        {
+        }
+
+        /// <summary>
+        /// Azure Plug and Play model ID.
         /// </summary>
         public string ModelId { get; internal set; }
+
+        /// <summary>
+        /// The module ID attached to the device ID.
+        /// </summary>
+        public string ModuleId { get; internal set; }
 
         /// <summary>
         /// The latest Twin received.
@@ -137,7 +196,7 @@ namespace nanoFramework.Azure.Devices.Client
         /// <summary>
         /// Open the connection with Azure IoT. This will initiate a connection from the device to the Azure IoT Hub instance.
         /// </summary>
-        /// <returns></returns>
+        /// <returns>True if open.</returns>
         public bool Open()
         {
             // Creates MQTT Client usinf the default port of 8883 and the TLS 1.2 protocol
@@ -156,15 +215,18 @@ namespace nanoFramework.Azure.Devices.Client
             // event when connection has been dropped
             _mqttc.ConnectionClosed += ClientConnectionClosed;
 
-            string userName = $"{_iotHubName}/{_deviceId}/api-version=2020-09-30";
+            string userName = $"{_iotHubName}/{_deviceId}/?api-version={ApiVersion}";
             if (!string.IsNullOrEmpty(ModelId))
             {
                 userName += $"&model-id={HttpUtility.UrlEncode(ModelId)}";
-
             }
 
+            Helper.ComposeTelemetryInformation(ref userName);
+
+            // need to compute SHA if not using client certificate
+            string key = _hasClientCertificate ? null : Helper.GetSharedAccessSignature(null, _sasKey, $"{_iotHubName}/devices/{_deviceId}", new TimeSpan(24, 0, 0));
+
             // Now connect the device
-            string key = _isCertificate ? _privateKey : Helper.GetSharedAccessSignature(null, _sasKey, $"{_iotHubName}/devices/{_deviceId}", new TimeSpan(24, 0, 0));
             _mqttc.Connect(
                 _deviceId,
                 userName,
@@ -203,7 +265,7 @@ namespace nanoFramework.Azure.Devices.Client
         }
 
         /// <summary>
-        /// Reconnect to Azure Iot Hub
+        /// Reconnect to Azure Iot Hub.
         /// </summary>
         public void Reconnect()
         {
@@ -222,32 +284,43 @@ namespace nanoFramework.Azure.Devices.Client
         /// </summary>
         public void Close()
         {
-            if (_mqttc.IsConnected)
+            if (_mqttc != null)
             {
-                _mqttc.Unsubscribe(new[] {
+                if (_mqttc.IsConnected)
+                {
+                    _mqttc.Unsubscribe(new[] {
                     $"devices/{_deviceId}/messages/devicebound/#",
                     "$iothub/twin/#",
                     "$iothub/methods/POST/#"
                     });
+                }
+
                 _mqttc.Disconnect();
+                _mqttc.Close();
                 // Make sure all get disconnected, cleared 
                 Thread.Sleep(1000);
             }
 
-            _timerTokenRenew.Dispose();
+            _timerTokenRenew?.Dispose();
         }
 
         /// <summary>
         /// Gets the twin.
         /// </summary>
-        /// <param name="cancellationToken">A cancellation token</param>
+        /// <param name="cancellationToken">A cancellation token.</param>
         /// <returns>The twin.</returns>
         /// <remarks>It is strongly recommended to use a cancellation token that can be canceled and manage this on the 
         /// caller code level. A reasonable time of few seconds is recommended with a retry mechanism.</remarks>
         public Twin GetTwin(CancellationToken cancellationToken = default)
         {
             _twinReceived = false;
-            _mqttc.Publish($"{TwinDesiredPropertiesTopic}?$rid={Guid.NewGuid()}", Encoding.UTF8.GetBytes(""), MqttQoSLevel.AtLeastOnce, false);
+            _mqttc.Publish(
+                $"{TwinDesiredPropertiesTopic}?$rid={Guid.NewGuid()}",
+                Encoding.UTF8.GetBytes(""),
+                null,
+                new ArrayList(),
+                MqttQoSLevel.AtLeastOnce,
+                false);
 
             while (!_twinReceived && !cancellationToken.IsCancellationRequested)
             {
@@ -267,7 +340,13 @@ namespace nanoFramework.Azure.Devices.Client
         {
             string twin = reported.ToJson();
             Debug.WriteLine($"update twin: {twin}");
-            var rid = _mqttc.Publish($"{TwinReportedPropertiesTopic}?$rid={Guid.NewGuid()}", Encoding.UTF8.GetBytes(twin), MqttQoSLevel.AtLeastOnce, false);
+            var rid = _mqttc.Publish(
+                $"{TwinReportedPropertiesTopic}?$rid={Guid.NewGuid()}",
+                Encoding.UTF8.GetBytes(twin),
+                null,
+                new ArrayList(),
+                MqttQoSLevel.AtLeastOnce,
+                false);
             ConfirmationStatus conf = new(rid);
             _waitForConfirmation.Add(conf);
             _ioTHubStatus.Status = Status.TwinUpdated;
@@ -275,11 +354,11 @@ namespace nanoFramework.Azure.Devices.Client
             StatusUpdated?.Invoke(this, new StatusUpdatedEventArgs(_ioTHubStatus));
 
             if (cancellationToken.CanBeCanceled)
-            {                
+            {
                 while (!conf.Received && !cancellationToken.IsCancellationRequested)
                 {
                     cancellationToken.WaitHandle.WaitOne(200, true);
-                }                
+                }
             }
 
             _waitForConfirmation.Remove(conf);
@@ -308,32 +387,149 @@ namespace nanoFramework.Azure.Devices.Client
         /// Send a message to Azure IoT.
         /// </summary>
         /// <param name="message">The message to send.</param>
+        /// <param name="contentType">Content of the application message.</param>
+        /// <param name="cancellationToken">A cancellation token. If you use the default one, the confirmation of delivery will not be awaited.</param>
+        /// <returns>True for successful message delivery.</returns>
+        public bool SendMessage(
+            string message,
+            string contentType,
+            CancellationToken cancellationToken = default)
+        {
+            return SendMessage(
+                message,
+                contentType,
+                new ArrayList(),
+                cancellationToken,
+                null);
+        }
+
+        /// <summary>
+        /// Send a message to Azure IoT.
+        /// </summary>
+        /// <param name="message">The message to send.</param>
         /// <param name="cancellationToken">A cancellation token. If you use the default one, the confirmation of delivery will not be awaited.</param>
         /// <param name="dtdlComponentname">The DTDL component name.</param>
         /// <returns>True for successful message delivery.</returns>
-        public bool SendMessage(string message, CancellationToken cancellationToken = default, string dtdlComponentname = "")
+        public bool SendMessage(
+            string message,
+            CancellationToken cancellationToken = default,
+            string dtdlComponentname = "")
         {
-            string topic = _telemetryTopic;
+            return SendMessage(
+                message,
+                null,
+                new ArrayList(),
+                cancellationToken,
+                null);
+        }
+
+        /// <summary>
+        /// Send a message to Azure IoT.
+        /// </summary>
+        /// <param name="message">The message to send.</param>
+        /// <param name="contentType">Content of the application message.</param>
+        /// <param name="userProperties">User properties to add to the application message.</param>
+        /// <param name="cancellationToken">A cancellation token. If you use the default one, the confirmation of delivery will not be awaited.</param>
+        /// <param name="dtdlComponentname">The DTDL component name.</param>
+        /// <returns>True for successful message delivery.</returns>
+        public bool SendMessage(
+            string message,
+            string contentType,
+            ArrayList userProperties,
+            CancellationToken cancellationToken = default,
+            string dtdlComponentname = "")
+        {
+            StringBuilder topic = new(_telemetryTopic);
+
+            // add content type to property bag, if there is one
+            if (!string.IsNullOrEmpty(contentType))
+            {
+                topic.Append(EncodeContentType(contentType));
+                topic.Append("&");
+            }
+
+            // add user properties to property bag, if they exist
+            if (userProperties != null
+                && userProperties.Count > 0)
+            {
+                topic.Append(EncodeUserProperties(userProperties));
+                topic.Append("&");
+            }
 
             if (!string.IsNullOrEmpty(dtdlComponentname))
             {
-                topic += $"$.sub={dtdlComponentname}";
+                topic.Append($"$.sub={HttpUtility.UrlEncode(dtdlComponentname)}");
             }
 
-            var rid = _mqttc.Publish(topic, Encoding.UTF8.GetBytes(message), QosLevel, false);
+            var topicName = topic.ToString();
+
+            // remove trailing '&' if there is one
+            if (topicName.EndsWith("&"))
+            {
+                topicName = topicName.Substring(0, topicName.Length - 1);
+            }
+
+            var rid = _mqttc.Publish(
+                topicName,
+                Encoding.UTF8.GetBytes(message),
+                null,
+                new ArrayList(),
+                QosLevel,
+                false);
+
             ConfirmationStatus conf = new(rid);
             _waitForConfirmation.Add(conf);
 
             if (cancellationToken.CanBeCanceled)
-            {                
+            {
                 while (!conf.Received && !cancellationToken.IsCancellationRequested)
                 {
                     cancellationToken.WaitHandle.WaitOne(200, true);
-                }                
+                }
             }
 
             _waitForConfirmation.Remove(conf);
+
             return conf.Received;
+        }
+
+        internal string EncodeContentType(string contentType)
+        {
+            return $"$.ct={HttpUtility.UrlEncode(contentType)}&$.ce=utf-8";
+        }
+
+        internal string EncodeUserProperties(ArrayList userProperties)
+        {
+            StringBuilder encodedUserProperties = new();
+
+            foreach (UserProperty property in userProperties)
+            {
+                if (!property.GetType().Equals(typeof(UserProperty)))
+                {
+#pragma warning disable S3928 // OK to use this in .NET nanoFramework without the argument name
+                    throw new ArgumentException();
+#pragma warning restore S3928 // Parameter names used into ArgumentException constructors should match an existing one 
+                }
+
+                if (string.IsNullOrEmpty(property.Name) || string.IsNullOrEmpty(property.Value))
+                {
+#pragma warning disable S3928 // OK to use this in .NET nanoFramework without the argument name
+                    throw new ArgumentException();
+#pragma warning restore S3928 // Parameter names used into ArgumentException constructors should match an existing one 
+                }
+                else
+                {
+                    encodedUserProperties.Append(HttpUtility.UrlEncode(property.Name));
+                    encodedUserProperties.Append("=");
+                    encodedUserProperties.Append(HttpUtility.UrlEncode(property.Value));
+                    encodedUserProperties.Append("&");
+                }
+            }
+
+            // remove trailing '&'
+            return encodedUserProperties.ToString(
+                0,
+                encodedUserProperties.Length - 1);
         }
 
         private void ClientMqttMsgReceived(object sender, MqttMsgPublishEventArgs e)
@@ -358,7 +554,7 @@ namespace nanoFramework.Azure.Devices.Client
                     }
                     else if (e.Topic.StartsWith("$iothub/twin/PATCH/properties/desired/"))
                     {
-                        TwinUpated?.Invoke(this, new TwinUpdateEventArgs(new TwinCollection(message)));
+                        TwinUpdated?.Invoke(this, new TwinUpdateEventArgs(new TwinCollection(message)));
                         _ioTHubStatus.Status = Status.TwinUpdateReceived;
                         _ioTHubStatus.Message = string.Empty;
                         StatusUpdated?.Invoke(this, new StatusUpdatedEventArgs(_ioTHubStatus));
@@ -391,7 +587,7 @@ namespace nanoFramework.Azure.Devices.Client
                     const string C9PatternMainStyle = "<<Main>$>g__";
                     string method = e.Topic.Substring(DirectMethodTopic.Length);
                     string methodName = method.Substring(0, method.IndexOf('/'));
-                    int rid = Convert.ToInt32(method.Substring(method.IndexOf('=') + 1),16);
+                    int rid = Convert.ToInt32(method.Substring(method.IndexOf('=') + 1), 16);
                     _ioTHubStatus.Status = Status.DirectMethodCalled;
                     _ioTHubStatus.Message = $"{method}/{message}";
                     StatusUpdated?.Invoke(this, new StatusUpdatedEventArgs(_ioTHubStatus));
@@ -408,11 +604,23 @@ namespace nanoFramework.Azure.Devices.Client
                             try
                             {
                                 var res = mt.Invoke(rid, message);
-                                _mqttc.Publish($"$iothub/methods/res/200/?$rid={rid:X}", Encoding.UTF8.GetBytes(res), MqttQoSLevel.AtLeastOnce, false);
+                                _mqttc.Publish(
+                                    $"$iothub/methods/res/200/?$rid={rid:X}",
+                                    Encoding.UTF8.GetBytes(res),
+                                    null,
+                                    new ArrayList(),
+                                    MqttQoSLevel.AtLeastOnce,
+                                    false);
                             }
                             catch (Exception ex)
                             {
-                                _mqttc.Publish($"$iothub/methods/res/504/?$rid={rid:X}", Encoding.UTF8.GetBytes($"{{\"Exception:\":\"{ex}\"}}"), MqttQoSLevel.AtLeastOnce, false);
+                                _mqttc.Publish(
+                                    $"$iothub/methods/res/504/?$rid={rid:X}",
+                                    Encoding.UTF8.GetBytes($"{{\"Exception:\":\"{ex}\"}}"),
+                                    null,
+                                    new ArrayList(),
+                                    MqttQoSLevel.AtLeastOnce,
+                                    false);
                             }
                         }
                     }

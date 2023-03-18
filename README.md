@@ -10,8 +10,7 @@
 
 | Component | Build Status | NuGet Package |
 |:-|---|---|
-| nanoFramework.Azure.Devices.Client | [![Build Status](https://dev.azure.com/nanoframework/Azure.Devices/_apis/build/status/nanoframework.nanoFramework.Azure.Devices?branchName=main)](https://dev.azure.com/nanoframework/Azure.Devices/_build/latest?definitionId=75&branchName=main) | [![NuGet](https://img.shields.io/nuget/v/nanoFramework.Azure.Devices.Client.svg?label=NuGet&style=flat&logo=nuget)](https://www.nuget.org/packages/nanoFramework.Azure.Devices.Client/) |
-| nanoFramework.Azure.Devices.Client (preview) | [![Build Status](https://dev.azure.com/nanoframework/Azure.Devices/_apis/build/status/nanoframework.nanoFramework.Azure.Devices?branchName=develop)](https://dev.azure.com/nanoframework/Azure.Devices/_build/latest?definitionId=75&branchName=develop) | [![NuGet](https://img.shields.io/nuget/vpre/nanoFramework.Azure.Devices.Client.svg?label=NuGet&style=flat&logo=nuget)](https://www.nuget.org/packages/nanoFramework.Azure.Devices.Client/) |
+| nanoFramework.Azure.Devices.Client | [![Build Status](https://dev.azure.com/nanoframework/Azure.Devices/_apis/build/status/nanoFramework.Azure.Devices?repoName=nanoframework%2FnanoFramework.Azure.Devices&branchName=main)](https://dev.azure.com/nanoframework/Azure.Devices/_build/latest?definitionId=75&repoName=nanoframework%2FnanoFramework.Azure.Devices&branchName=main)| [![NuGet](https://img.shields.io/nuget/v/nanoFramework.Azure.Devices.Client.svg?label=NuGet&style=flat&logo=nuget)](https://www.nuget.org/packages/nanoFramework.Azure.Devices.Client/) |
 
 ## See it in action
 
@@ -117,7 +116,7 @@ Reporting Plug & Play properties is supported. He is a comprehensive example and
 ```csharp
 const string TargetTemerature = "targetTemperature";
 DeviceClient azureIoT = new DeviceClient(Secrets.IotHub, Secrets.DeviceName, Secrets.SasKey, azureCert: new X509Certificate(Resource.GetBytes(Resource.BinaryResources.AzureRoot)), modelId: "dtmi:com:example:Thermostat;1");
-azureIoT.TwinUpated += AzureTwinUpdated;
+azureIoT.TwinUpdated += AzureTwinUpdated;
 azureIoT.Open();
 
 void AzureTwinUpdated(object sender, TwinUpdateEventArgs e)
@@ -193,11 +192,11 @@ Note: the function will return false if the twin reception confirmation is not c
 You can also register for any twin update:
 
 ```csharp
-azureIoT.TwinUpated += TwinUpdatedEvent;
+azureIoT.TwinUpdated += TwinUpdatedEvent;
 
 void TwinUpdatedEvent(object sender, TwinUpdateEventArgs e)
 {
-    Debug.WriteLine($"Twin update received:  {e.Twin.Count}");
+    Debug.WriteLine($"Twin update received: {e.Twin.Count}");
 }
 ```
 
@@ -314,6 +313,20 @@ Here are existing QoS levels that you can use:
 
 While it's possible to configure QoS 0 (AtMostOnce) for faster message exchange, you should note that the delivery isn't guaranteed nor acknowledged. For this reason, QoS 0 is often referred as "fire and forget".
 
+## Module support
+
+Modules are supported, you will have to use the constructor to pass the module ID either with a SAS token, either with a certificate. The rest fully works like a normal device. Everything is fully supported including module direct method, telemetry and of course twins!
+
+For example here with a SAS token. Note that the certificates are fully supported as well. And if you are not storing the Azure root certificate on the device, you'll need to pass it in the constructor.
+
+```csharp
+const string DeviceID = "nanoEdgeTwin";
+const string ModuleID = "myModule";
+const string IotBrokerAddress = "youriothub.azure-devices.net";
+const string SasKey = "yoursaskey";
+DeviceClient module = new DeviceClient(IotBrokerAddress, DeviceID, ModuleID, SasKey);
+```
+
 ## Azure IoT Device Provisioning Service (DPS) support
 
 This SDK also supports the Azure IoT Device Provisioning Service. Group and individual provisioning scenarios are supported either with a symmetric key either with certificates. To understand the mechanism behind DPS, it is recommended to read the [documentation](https://docs.microsoft.com/azure/iot-dps/).
@@ -356,6 +369,34 @@ if(!res)
     Debug.WriteLine($"can't open the device");
     return;
 }
+```
+
+In case a [DPS model](https://github.com/Azure/opendigitaltwins-dtdl/blob/master/DTDL/v2/dtdlv2.md) is going to be used, the ID of the model has to be passed to the ProvisioningDeviceClient and DeviceClient constructor.
+The code above requires the following changes.
+
+Add the model ID as a constant:
+
+```csharp
+public const string ModelId = "dtmi:orgpal:palthree:palthree_demo_0;1";
+
+```
+
+Create the additional payload information with the model ID to be sent along the registration with DPS and pass that to the call to `Register()`.
+
+```csharp
+var pnpPayload = new ProvisioningRegistrationAdditionalData
+{
+    JsonData = PnpConvention.CreateDpsPayload(ModelId),
+};
+
+var myDevice = provisioning.Register(pnpPayload, new CancellationTokenSource(60000).Token);
+
+```
+
+Create the device client passing the model ID to the respective parameter in the constructor.
+
+```csharp
+var device = new DeviceClient(myDevice.AssignedHub, myDevice.DeviceId, SasKey, nanoFramework.M2Mqtt.Messages.MqttQoSLevel.AtLeastOnce, azureCA, ModelId);
 ```
 
 Note: like for the `DeviceClient` you need to make sure you are connected to a network properly and also have a proper data and time set on the device.
